@@ -1,0 +1,37 @@
+name: Build Secret Hatch Notifer+.exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Build exe
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Secret Hatch Notifer+"
+          --icon icon.ico --add-data "icon.ico;."
+          --collect-all customtkinter --collect-all rapidocr_onnxruntime --collect-all onnxruntime
+          --hidden-import win32ui --hidden-import cv2 --hidden-import win32timezone
+          hatch_watcher.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Secret-Hatch-Notifer-exe
+          path: "dist/Secret Hatch Notifer+.exe"
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "dist/Secret Hatch Notifer+.exe"
