@@ -39,13 +39,14 @@ TEXT, MUTED = "#ececee", "#8d8d95"
 ACCENT, ACCENT_HOT, ACCENT_DEEP, BANNER, GREEN = "#e9e9ec", "#ffffff", "#34343a", "#1d1d21", "#4ade80"
 AMBER, DANGER, ON_ACCENT = "#fbbf24", "#ef4444", "#0c0c0d"
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.1"
 # Where the app looks for new versions. Use ONE of:
 #   - a GitHub releases link:  "https://api.github.com/repos/YOUR-NAME/YOUR-REPO/releases/latest"
 #   - a link to a small JSON file you host:  {"version": "1.1.0", "url": "https://download-link", "notes": "what's new"}
 # Leave it empty to turn update checking off.
-UPDATE_URL = "https://api.github.com/repos/jonathanbro12838-hub/hatcher/releases/latest"
+UPDATE_URL = "https://api.github.com/repos/jonathanbro12838-hub/hatcher-releases/releases/latest"
 
+GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_NOACTIVATE, LWA_ALPHA = -20, 0x80000, 0x20, 0x08000000, 2
 ROBLOX_EXES = ("robloxplayerbeta.exe", "robloxplayer.exe", "windows10universal.exe")
 ID_RE = re.compile(r"^\d{17,20}$")
 FULL_W, FULL_H = 1280, 720
@@ -75,23 +76,23 @@ except Exception:
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 STATS_PATH = os.path.join(APP_DIR, "stats.json")
 DEFAULTS = {"discord_id": "", "rearm": 6, "interval": 1.0, "peek": 5, "minimized": True,
-            "fullsize": True, "reveal_delay": 8, "dc_warn": True, "reveal_pic": False,
+            "fullsize": False, "reveal_delay": 8, "dc_warn": True, "reveal_pic": False,
             "sound_ui": True, "sound_alert": True}
 
 # Shared community webhook, kept out of the UI and not stored in plain text.
 # (Anyone determined can still extract it from a client; see README notes.)
-_P = (
-    "AANZExxXQloKAAcaQgRVRhRCDkAMHRxBHhEbRRle"
-    "AwQCUlpbWE1aWUNAGkAHWk8eW1hUWVogMz0mRBFp"
-    "LRZYEhUfCyI2Wg0aRSJIDj5MJAMkXgwZBkwNHixU"
-    "OTV3Vx46KBsJLS4WXEVVJA5JFTc8IQY4Pg0pZBFj"
-    "BQ=="
-)
+try:
+    import hw_secrets as _S  # written at build time from GitHub secrets / webhooks.txt, never stored in the repo
+except Exception:
+    _S = None
 _K = b"hw-community-v1"
 
 
-def _hook():
-    raw = base64.b64decode("".join(_P))
+def _hook(kind="main"):
+    blob = getattr(_S, "TEST" if kind == "test" else "MAIN", "") if _S else ""
+    if not blob:
+        raise RuntimeError("this copy was built without a Discord webhook")
+    raw = base64.b64decode(blob)
     return bytes(c ^ _K[i % len(_K)] for i, c in enumerate(raw)).decode()
 
 
@@ -103,35 +104,42 @@ def is_reveal_text(text):
 
 
 def find_black_egg(frame):
-    """True if a big solid-black silhouette (the unrevealed egg/pet) sits near the middle of the frame."""
+    """True if a big solid-black silhouette (the unrevealed secret) sits in the middle of the window.
+
+    Works for tiny, narrow, tall or half-snapped windows: it only looks at the shape's RELATIVE size and position,
+    and it is fine if the shape runs into the window edges (a narrow window crops the sides of the scene)."""
     if frame is None or frame.size == 0:
         return False
     h, w = frame.shape[:2]
-    sw = 480
-    small = cv2.resize(frame, (sw, max(1, int(h * sw / w))), interpolation=cv2.INTER_AREA)
+    if h < 40 or w < 40:
+        return False
+    sc = 480.0 / max(h, w)
+    sw, sh = max(24, int(w * sc)), max(24, int(h * sc))
+    small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA if sc < 1 else cv2.INTER_LINEAR)
     H, W = small.shape[:2]
-    dark = (small.max(axis=2) < 16).astype(np.uint8)
-    if dark.mean() > 0.55:  # mostly black = loading screen, not an egg
+    peak = small.max(axis=2)
+    dark = (peak < 16).astype(np.uint8)
+    if dark.mean() > 0.75:  # almost all black = loading screen / black capture, not a secret
+        return False
+    if (peak > 60).mean() < 0.10:  # needs real picture around it (the game UI), not just a few pixels
         return False
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     n, _, stats, cents = cv2.connectedComponentsWithStats(dark, connectivity=8)
     lum = small.mean(axis=2)
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
-        if not (0.05 <= area / float(W * H) <= 0.55):
+        if not (0.04 <= area / float(W * H) <= 0.80):
             continue
         cx, cy = cents[i]
-        if not (0.25 * W <= cx <= 0.75 * W and 0.2 * H <= cy <= 0.8 * H):
+        if not (0.20 * W <= cx <= 0.80 * W and 0.15 * H <= cy <= 0.85 * H):
             continue
-        if area / float(bw * bh) < 0.55 or not (0.6 <= bh / float(bw) <= 2.2):
-            continue
-        if x <= 1 or x + bw >= W - 1:
+        if area / float(bw * bh) < 0.50 or not (0.35 <= bh / float(bw) <= 3.5):
             continue
         pad = 6
         x0, y0, x1, y1 = max(0, x - pad), max(0, y - pad), min(W, x + bw + pad), min(H, y + bh + pad)
         ring = lum[y0:y1, x0:x1].copy()
         ring[(y - y0):(y - y0 + bh), (x - x0):(x - x0 + bw)] = np.nan
-        if np.nanmean(ring) < 20:
+        if np.isfinite(ring).any() and np.nanmean(ring) < 20:
             continue
         return True
     return False
@@ -224,6 +232,8 @@ def fmt_uptime(sec):
 
 def to_jpeg_bytes(frame, max_width=1280):
     img = Image.fromarray(frame)
+    if img.width < 800:  # tiny window: enlarge so the picture in Discord is still easy to see
+        img = img.resize((800, max(1, int(img.height * 800 / img.width))), Image.LANCZOS)
     if img.width > max_width:
         img = img.resize((max_width, int(img.height * max_width / img.width)), Image.LANCZOS)
     buf = io.BytesIO()
@@ -231,14 +241,14 @@ def to_jpeg_bytes(frame, max_width=1280):
     return buf.getvalue()
 
 
-def post_discord(payload, image_bytes=None, ping_id=None):
+def post_discord(payload, image_bytes=None, ping_id=None, test=False):
     payload = dict(payload)
     payload["allowed_mentions"] = {"users": [ping_id]} if ping_id else {"parse": []}
     if image_bytes:
-        r = requests.post(_hook(), data={"payload_json": json.dumps(payload)},
+        r = requests.post(_hook("test" if test else "main"), data={"payload_json": json.dumps(payload)},
                           files={"files[0]": ("secret.jpg", image_bytes, "image/jpeg")}, timeout=20)
     else:
-        r = requests.post(_hook(), json=payload, timeout=20)
+        r = requests.post(_hook("test" if test else "main"), json=payload, timeout=20)
     if r.status_code >= 300:
         raise RuntimeError(f"Discord replied {r.status_code}: {r.text[:120]}")
 
@@ -304,17 +314,18 @@ def bring_to_front(hwnd):
 
 
 def looks_incomplete(frame):
-    """True if the frame is missing or any quarter of it is pure black (a partial window capture)."""
+    """True if the frame is missing or two or more quarters of it are pure black (a partial window capture)."""
     if frame is None or frame.size == 0:
         return True
     h, w = frame.shape[:2]
     if h < 20 or w < 20:
         return True
+    black = 0
     for ys in (slice(0, h // 2), slice(h // 2, h)):
         for xs in (slice(0, w // 2), slice(w // 2, w)):
             if frame[ys, xs][::8, ::8].max() < 8:
-                return True
-    return False
+                black += 1
+    return black >= 2
 
 
 class Grabber:
@@ -375,51 +386,61 @@ class Grabber:
                 return alt
         return frame
 
-    def grab_full(self, hwnd, mode, settle=0.8):
-        """Briefly enlarge a small window to a normal size so the game draws its whole view, capture it,
-        then put the window back exactly where it was. Never steals focus."""
-        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-        w, h = right - left, bottom - top
-        _, _, cw, ch = client_geometry(hwnd)
-        new_w = max(w, FULL_W + (w - cw))
-        new_h = max(h, FULL_H + (h - ch))
-        flags = win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
-        try:
-            win32gui.SetWindowPos(hwnd, 0, left, top, new_w, new_h, flags)
-            time.sleep(settle)  # let the game redraw at the bigger size
-            return self.grab(hwnd, mode)
-        finally:
-            try:
-                win32gui.SetWindowPos(hwnd, 0, left, top, w, h, flags)
-            except Exception:
-                pass
-
     def peek(self, hwnd, mode, settle=1.2, full=False):
-        """Briefly restore a minimized window WITHOUT taking focus, capture it, minimize it again."""
+        """Look at a MINIMIZED window without the user seeing anything.
+
+        The window is restored without taking focus, made fully see-through and click-through, read through its own
+        render (PrintWindow), then minimized again and its normal style put back. If that gives a black picture it
+        falls back to a very short visible peek."""
+        ex_old = None
+        frame = None
+        try:
+            ex_old = win32gui.GetWindowLong(hwnd, GWL_EXSTYLE)
+            win32gui.SetWindowLong(hwnd, GWL_EXSTYLE, ex_old | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+            win32gui.SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)  # fully see-through
+        except Exception:
+            ex_old = None
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 3, ctypes.byref(ctypes.c_int(1)), 4)  # no minimize/restore animation
+        except Exception:
+            pass
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
             time.sleep(settle)  # give the game time to draw a fresh frame
             for attempt in range(2):
-                if full and not win32gui.IsZoomed(hwnd):
-                    frame = self.grab_full(hwnd, mode)
-                else:
-                    frame = self.grab(hwnd, mode)
+                frame = self._printwindow(hwnd)
                 if frame is not None and frame.size and frame.mean() >= 2:
                     return frame
-                time.sleep(0.8)  # still black: give it one more moment
+                time.sleep(0.8)
+            if ex_old is not None:  # the invisible read came back black: show it for a moment instead
+                try:
+                    win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                alt = self.grab(hwnd, mode)
+                if alt is not None and alt.size:
+                    return alt
             return frame
         finally:
             try:
                 win32gui.ShowWindow(hwnd, win32con.SW_SHOWMINNOACTIVE)
             except Exception:
                 pass
+            if ex_old is not None:
+                try:
+                    win32gui.SetWindowLong(hwnd, GWL_EXSTYLE, ex_old)
+                except Exception:
+                    pass
+            try:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 3, ctypes.byref(ctypes.c_int(0)), 4)
+            except Exception:
+                pass
 
     def capture(self, hwnd, mode, allow_peek=True, full=False):
         if win32gui.IsIconic(hwnd):
             return self.peek(hwnd, mode, full=full) if allow_peek else None
-        if full and is_small(hwnd):
-            return self.grab_full(hwnd, mode)
-        return self.grab(hwnd, mode)
+        return self.grab(hwnd, mode)  # never resizes or moves the user's window
 
 
 
@@ -653,9 +674,17 @@ class App(ctk.CTk):
         sb.grid(row=0, column=0, sticky="nsw")
         sb.grid_propagate(False)
         sb.grid_rowconfigure(10, weight=1)
-        self._label(sb, "SECRET HATCH", 15, TEXT, True).grid(row=0, column=0, sticky="w", padx=20, pady=(22, 0))
-        self._label(sb, "NOTIFER+", 15, TEXT, True).grid(row=1, column=0, sticky="w", padx=20)
-        self._label(sb, "SECRET ALERTS MANAGER", 9, MUTED, True).grid(row=2, column=0, sticky="w", padx=20, pady=(0, 18))
+        hdr = ctk.CTkFrame(sb, fg_color="transparent")
+        hdr.grid(row=0, column=0, rowspan=3, sticky="ew", padx=16, pady=(20, 16))
+        try:
+            logo = Image.open(resource_path("icon.png"))
+            self.logo_img = ctk.CTkImage(light_image=logo, dark_image=logo, size=(40, 40))
+            ctk.CTkLabel(hdr, image=self.logo_img, text="").grid(row=0, column=0, rowspan=3, padx=(0, 10))
+        except Exception:
+            pass
+        self._label(hdr, "SECRET HATCH", 13, TEXT, True).grid(row=0, column=1, sticky="w")
+        self._label(hdr, "NOTIFER+", 13, TEXT, True).grid(row=1, column=1, sticky="w")
+        self._label(hdr, "ALERTS MANAGER", 9, MUTED, True).grid(row=2, column=1, sticky="w")
         for i, (key, text) in enumerate((("workspace", "▣   Live workspace"), ("stats", "▤   Stats"),
                                          ("activity", "☰   Activity log"), ("settings", "⚙   Settings"))):
             b = ctk.CTkButton(sb, text=text, anchor="w", height=40, corner_radius=8, fg_color="transparent",
@@ -796,7 +825,7 @@ class App(ctk.CTk):
         self.peek_var = ctk.StringVar(value=str(self.cfg["peek"]))
         self.rev_var = ctk.StringVar(value=str(self.cfg["reveal_delay"]))
         self.min_var = ctk.BooleanVar(value=self.cfg["minimized"])
-        self.full_var = ctk.BooleanVar(value=self.cfg["fullsize"])
+        self.full_var = ctk.BooleanVar(value=False)
         self.dc_var = ctk.BooleanVar(value=self.cfg["dc_warn"])
         self.rev_pic_var = ctk.BooleanVar(value=self.cfg["reveal_pic"])
         self.sound_ui_var = ctk.BooleanVar(value=self.cfg["sound_ui"])
@@ -818,7 +847,6 @@ class App(ctk.CTk):
         op.grid(row=0, column=1, sticky="nsew", padx=(7, 0), pady=(0, 14))
         self._label(op, "OPTIONS", 10, MUTED, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 8))
         for i, (txt, var) in enumerate((("Scan minimized windows too", self.min_var),
-                                        ("Scan small windows at full size", self.full_var),
                                         ("Warn me if an account disconnects", self.dc_var),
                                         ("Also send a 2nd picture after reveal", self.rev_pic_var),
                                         ("Play a sound when a secret is found", self.sound_alert_var),
@@ -1224,7 +1252,7 @@ class App(ctk.CTk):
         if not win32gui.IsWindow(st.hwnd):
             return
         minimized = bool(win32gui.IsIconic(st.hwnd))
-        small = (not minimized) and s["fullsize"] and is_small(st.hwnd)
+        small = False  # small / half-size windows are scanned as they are, never resized
         if minimized and not s["minimized"]:
             st.hit, st.status = False, "Minimized (watching it is off)"
             return
@@ -1338,8 +1366,8 @@ class App(ctk.CTk):
                                       **({"footer": {"text": f"Secret #{counts['today']} today  •  #{counts['total']} all time  "
                                                              f"•  {label}: {counts['account_total']} total"}} if counts else {}),
                                       "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}]},
-                         to_jpeg_bytes(frame), ping_id=uid)
-            self.log(f"{pre}Alert + picture sent for {label}.")
+                         to_jpeg_bytes(frame), ping_id=uid, test=is_test)
+            self.log(f"{pre}Alert + picture sent for {label}." + (" (test channel)" if is_test else ""))
         except Exception as e:
             self.fail_count += 1
             self.log(f"Alert failed for {label}: {e}")
@@ -1381,8 +1409,8 @@ class App(ctk.CTk):
     def on_test_alert(self):
         if not self._valid_id():
             return
-        if time.time() - self.last_test < 20:
-            self.log("Test alerts are limited to one every 20 seconds (it posts to the shared channel).")
+        if time.time() - self.last_test < 30:
+            self.log("Test alerts are limited to one every 30 seconds.")
             return
         self.last_test = time.time()
         st = self._pick()
