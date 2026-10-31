@@ -1,12 +1,19 @@
 name: Build and release Secret Hatch Notifer+
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, for example v1.3.1"
+        required: true
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
   build:
@@ -18,21 +25,33 @@ jobs:
           python-version: "3.12"
       - name: Install requirements
         run: python -m pip install -r requirements.txt pyinstaller
+      - name: Add webhooks from GitHub secrets
+        env:
+          HATCH_WEBHOOK_MAIN: ${{ secrets.HATCH_WEBHOOK_MAIN }}
+          HATCH_WEBHOOK_TEST: ${{ secrets.HATCH_WEBHOOK_TEST }}
+        run: python make_secrets.py --require
       - name: Build exe
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Secret Hatch Notifer+"
-          --icon icon.ico --add-data "icon.ico;." --add-data "alert.wav;."
+          --icon icon.ico --add-data "icon.ico;." --add-data "icon.png;." --add-data "alert.wav;."
           --collect-all customtkinter --collect-all rapidocr_onnxruntime --collect-all onnxruntime
-          --hidden-import win32ui --hidden-import cv2 --hidden-import win32timezone
+          --hidden-import win32ui --hidden-import cv2 --hidden-import win32timezone --hidden-import hw_secrets
           hatch_watcher.py
       - name: Name the file for the release
         run: Copy-Item "dist/Secret Hatch Notifer+.exe" "dist/Secret-Hatch-Notifer.exe"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Secret-Hatch-Notifer-exe
-          path: dist/Secret-Hatch-Notifer.exe
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish to the public releases repo
         uses: softprops/action-gh-release@v2
         with:
+          repository: jonathanbro12838-hub/hatcher-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          files: dist/Secret-Hatch-Notifer.exe
+      - name: Also publish here (lets older installs update once; delete this step later)
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
           files: dist/Secret-Hatch-Notifer.exe
