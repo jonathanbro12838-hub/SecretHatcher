@@ -1,0 +1,9 @@
+customtkinter
+pywin32
+psutil
+mss
+numpy
+opencv-python-headless
+pillow
+requests
+rapidocr-onnxruntime
