@@ -13,7 +13,7 @@ python -m pip install -r requirements.txt pyinstaller
 echo.
 echo Building "Secret Hatch Notifer+.exe" (5-10 minutes, the file will be large)...
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Secret Hatch Notifer+" ^
-  --icon icon.ico --add-data "icon.ico;." ^
+  --icon icon.ico --add-data "icon.ico;." --add-data "alert.wav;." ^
   --collect-all customtkinter --collect-all rapidocr_onnxruntime --collect-all onnxruntime ^
   --hidden-import win32ui --hidden-import cv2 --hidden-import win32timezone ^
   hatch_watcher.py

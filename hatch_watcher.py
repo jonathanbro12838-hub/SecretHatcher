@@ -1,5 +1,5 @@
 """
-Secret Hatch Notifer+
+Secret Hatch Notifer+  (black / red)
 ------------------------------
 Watches your Roblox windows for the secret-hatch screen (the big BLACK egg
 silhouette in the middle of the screen, or the "Hold to Reveal!" text).
@@ -15,9 +15,8 @@ import sys
 if sys.platform != "win32":
     sys.exit("Secret Hatch Notifer+ only runs on Windows.")
 
-import webbrowser
+import webbrowser, tempfile, subprocess, winsound
 import io, os, re, json, time, queue, ctypes, base64, datetime, threading
-import math, struct, wave, hashlib, subprocess
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -32,29 +31,20 @@ import mss
 import win32con, win32gui, win32process, win32ui
 from PIL import Image
 from tkinter import ttk, messagebox, filedialog
+import tkinter as tk
 import customtkinter as ctk
 
-# Change THEME to "red" for the old black / red look.
-THEME = "neon"
-if THEME == "red":
-    BG, PANEL, PANEL2, BORDER = "#060606", "#0f0f10", "#171718", "#2e1418"
-    TEXT, MUTED, BANNER, GREEN = "#f4f0f0", "#9b9091", "#1a0709", "#4ade80"
-    ACCENT, ACCENT_HOT, ACCENT_DEEP = "#e11d2e", "#ff4455", "#7f1520"
-    VIOLET, BLUE, ON_ACCENT, SELECT = "#7f1520", "#e11d2e", "#ffffff", "#2a0d11"
-else:  # navy + orange + violet
-    BG, PANEL, PANEL2, BORDER = "#050816", "#0a1030", "#111a40", "#1f2b66"
-    TEXT, MUTED, BANNER, GREEN = "#eef1ff", "#8b93c4", "#0d1440", "#4ade80"
-    ACCENT, ACCENT_HOT, ACCENT_DEEP = "#ff9f1c", "#ffb84d", "#7a4a0a"
-    VIOLET, BLUE, ON_ACCENT, SELECT = "#7c4dff", "#2f6bff", "#0b0f26", "#1a2260"
-RED, RED_HOT, RED_DEEP = ACCENT, ACCENT_HOT, ACCENT_DEEP  # names used by older code below
+BG, SIDEBAR, PANEL, PANEL2, BORDER = "#0c0c0d", "#111113", "#18181b", "#222226", "#2c2c31"
+TEXT, MUTED = "#ececee", "#8d8d95"
+ACCENT, ACCENT_HOT, ACCENT_DEEP, BANNER, GREEN = "#e9e9ec", "#ffffff", "#34343a", "#1d1d21", "#4ade80"
+AMBER, DANGER, ON_ACCENT = "#fbbf24", "#ef4444", "#0c0c0d"
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 # Where the app looks for new versions. Use ONE of:
 #   - a GitHub releases link:  "https://api.github.com/repos/YOUR-NAME/YOUR-REPO/releases/latest"
-#   - a link to a small JSON file you host:
-#       {"version": "1.2.0", "download": "https://direct-link-to.exe", "notes": "what's new", "sha256": "(optional)"}
+#   - a link to a small JSON file you host:  {"version": "1.1.0", "url": "https://download-link", "notes": "what's new"}
 # Leave it empty to turn update checking off.
-UPDATE_URL = ""
+UPDATE_URL = "https://api.github.com/repos/jonathanbro12838-hub/hatcher/releases/latest"
 
 ROBLOX_EXES = ("robloxplayerbeta.exe", "robloxplayer.exe", "windows10universal.exe")
 ID_RE = re.compile(r"^\d{17,20}$")
@@ -63,6 +53,16 @@ FULL_W, FULL_H = 1280, 720
 def resource_path(name):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, name)
+
+
+SOUND_PATH = resource_path("alert.wav")
+
+
+def play_sound():
+    try:
+        winsound.PlaySound(SOUND_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except Exception:
+        pass
 
 
 # Settings and stats live in AppData, so the exe works from anywhere (Downloads, Desktop, a USB stick)
@@ -75,7 +75,8 @@ except Exception:
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 STATS_PATH = os.path.join(APP_DIR, "stats.json")
 DEFAULTS = {"discord_id": "", "rearm": 6, "interval": 1.0, "peek": 5, "minimized": True,
-            "fullsize": True, "reveal_delay": 8, "dc_warn": True, "reveal_pic": False, "sounds": True}
+            "fullsize": True, "reveal_delay": 8, "dc_warn": True, "reveal_pic": False,
+            "sound_ui": True, "sound_alert": True}
 
 # Shared community webhook, kept out of the UI and not stored in plain text.
 # (Anyone determined can still extract it from a client; see README notes.)
@@ -149,123 +150,20 @@ def parse_version(v):
 
 
 def fetch_update_info():
-    """Reads the update link. Works with a GitHub 'latest release' URL or your own small JSON file."""
     r = requests.get(UPDATE_URL, timeout=8, headers={"Accept": "application/json", "User-Agent": "SecretHatchNotifer"})
     r.raise_for_status()
     d = r.json()
     ver = d.get("tag_name") or d.get("version") or ""
-    page = d.get("html_url") or d.get("page") or ""
-    exe = d.get("download") or ""
-    url = d.get("url") or ""
-    if url and not exe and url.lower().split("?")[0].endswith(".exe"):
-        exe = url
-    elif url and not page:
-        page = url
-    for a in d.get("assets") or []:  # GitHub release: take the attached .exe
+    url = d.get("html_url") or d.get("url") or ""
+    notes = d.get("body") or d.get("notes") or ""
+    asset = ""
+    for a in d.get("assets") or []:
         if str(a.get("name", "")).lower().endswith(".exe"):
-            exe = a.get("browser_download_url") or exe
+            asset = a.get("browser_download_url") or ""
             break
-    return {"version": str(ver), "page": str(page), "exe": str(exe), "notes": str(d.get("body") or d.get("notes") or ""),
-            "sha256": str(d.get("sha256") or "").strip().lower()}
-
-
-def download_update_file(info, progress=None):
-    """Downloads the new exe next to the app's settings and checks it is a real program."""
-    url = info["exe"]
-    if not url.lower().startswith("https://"):
-        raise RuntimeError("the update link must be https")
-    folder = os.path.join(APP_DIR, "update")
-    os.makedirs(folder, exist_ok=True)
-    dest = os.path.join(folder, "new.exe")
-    h, done = hashlib.sha256(), 0
-    with requests.get(url, stream=True, timeout=30, headers={"User-Agent": "SecretHatchNotifer"}) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length") or 0)
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(256 * 1024):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                h.update(chunk)
-                done += len(chunk)
-                if progress and total:
-                    progress(min(100, int(done * 100 / total)))
-    with open(dest, "rb") as f:
-        head = f.read(2)
-    if head != b"MZ" or done < 1_000_000:
-        raise RuntimeError("the downloaded file isn't a valid program")
-    want = info.get("sha256", "")
-    if want and h.hexdigest() != want:
-        os.remove(dest)
-        raise RuntimeError("the download didn't match its checksum")
-    return dest
-
-
-def launch_updater(new_path):
-    """Starts a tiny helper that waits for this app to close, swaps in the new exe, and reopens it."""
-    old = sys.executable
-    bat = os.path.join(APP_DIR, "update", "apply_update.bat")
-    with open(bat, "w", encoding="utf-8") as f:
-        f.write("@echo off\r\nset PYINSTALLER_RESET_ENVIRONMENT=1\r\nset N=0\r\n:wait\r\nset /a N+=1\r\n"
-                "if %N% GTR 90 exit /b 1\r\nping -n 2 127.0.0.1 >nul\r\n"
-                f'move /y "{new_path}" "{old}" >nul 2>&1\r\nif errorlevel 1 goto wait\r\n'
-                f'start "" "{old}"\r\n(goto) 2>nul & del "%~f0"\r\n')
-    env = os.environ.copy()
-    env.pop("_MEIPASS2", None)
-    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    subprocess.Popen(["cmd", "/c", bat], env=env, creationflags=0x08000000 | 0x00000008, close_fds=True)
-
-
-# --------------------------------------------------------------------------
-# Button / click sounds (tiny tones generated on first run, played with winsound)
-# --------------------------------------------------------------------------
-SOUND_DIR = os.path.join(APP_DIR, "sounds")
-_TONES = {"click": [(1450, 28)], "toggle": [(1000, 26), (1500, 34)],
-          "start": [(660, 70), (990, 120)], "stop": [(990, 70), (520, 130)],
-          "error": [(300, 110), (230, 150)], "update": [(880, 70), (1175, 70), (1568, 130)]}
-_SOUND_PATHS, _SOUND_ON = {}, True
-
-
-def _write_tone(path, notes, vol=0.28, rate=22050):
-    frames = bytearray()
-    for freq, ms in notes:
-        n = int(rate * ms / 1000)
-        for i in range(n):
-            env = min(1.0, i / (rate * 0.004)) * (1 - i / n) ** 1.6
-            frames += struct.pack("<h", int(32767 * vol * env * math.sin(2 * math.pi * freq * i / rate)))
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(bytes(frames))
-
-
-def init_sounds():
-    try:
-        os.makedirs(SOUND_DIR, exist_ok=True)
-        for name, notes in _TONES.items():
-            path = os.path.join(SOUND_DIR, f"{name}_v1.wav")
-            if not os.path.exists(path) or os.path.getsize(path) < 100:
-                _write_tone(path, notes)
-            _SOUND_PATHS[name] = path
-    except Exception:
-        pass
-
-
-def set_sounds(on):
-    global _SOUND_ON
-    _SOUND_ON = bool(on)
-
-
-def play_sound(name):
-    path = _SOUND_PATHS.get(name)
-    if not _SOUND_ON or not path:
-        return
-    try:
-        import winsound
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-    except Exception:
-        pass
+    if not asset:
+        asset = d.get("download") or ""
+    return str(ver), str(url), str(notes), str(asset)
 
 
 def load_stats():
@@ -287,6 +185,14 @@ def save_stats(stats):
             json.dump(stats, f)
     except Exception:
         pass
+
+
+def make_thumb(frame, w=224, h=126):
+    img = Image.fromarray(frame)
+    img.thumbnail((w, h), Image.BILINEAR)
+    canvas = Image.new("RGB", (w, h), (0, 0, 0))
+    canvas.paste(img, ((w - img.width) // 2, (h - img.height) // 2))
+    return canvas
 
 
 def load_config():
@@ -538,6 +444,86 @@ def snap_window(hwnd, allow_peek=True, full=True):
     return frame
 
 
+class StatCard(ctk.CTkFrame):
+    def __init__(self, master, title):
+        super().__init__(master, fg_color=PANEL, border_width=1, border_color=BORDER, corner_radius=12)
+        self.val = ctk.CTkLabel(self, text="0", text_color=TEXT, font=ctk.CTkFont(size=28, weight="bold"))
+        self.val.pack(anchor="w", padx=16, pady=(12, 0))
+        ctk.CTkLabel(self, text=title, text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 12))
+
+    def set(self, v):
+        self.val.configure(text=f"{int(v):,}")
+
+
+class AccountCard(ctk.CTkFrame):
+    """One Roblox window: live preview, memory, status, watch switch and a Manage menu."""
+    W, H = 224, 126
+
+    def __init__(self, master, app, st):
+        super().__init__(master, fg_color=PANEL, border_width=2, border_color=BORDER, corner_radius=12)
+        self.app, self.hwnd, self.seen_v, self.last = app, st.hwnd, -1, None
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(8, 4))
+        self.name = ctk.CTkLabel(top, text=st.label, text_color=TEXT, anchor="w", font=ctk.CTkFont(size=12, weight="bold"))
+        self.name.pack(side="left")
+        self.mem = ctk.CTkLabel(top, text="", text_color=MUTED, font=ctk.CTkFont(size=10))
+        self.mem.pack(side="left", padx=(8, 0))
+        self.menu_btn = ctk.CTkButton(top, text="Manage ▾", width=74, height=24, corner_radius=7, fg_color=PANEL2,
+                                      hover_color=ACCENT_DEEP, text_color=TEXT, font=ctk.CTkFont(size=11),
+                                      command=self._menu)
+        self.menu_btn.pack(side="right")
+        self.img = ctk.CTkLabel(self, text="Waiting for a preview…", text_color=MUTED, width=self.W, height=self.H,
+                                fg_color="#000000", corner_radius=6, font=ctk.CTkFont(size=11))
+        self.img.pack(padx=10)
+        bot = ctk.CTkFrame(self, fg_color="transparent")
+        bot.pack(fill="x", padx=10, pady=(6, 9))
+        self.dot = ctk.CTkLabel(bot, text="●", text_color=MUTED, font=ctk.CTkFont(size=12))
+        self.dot.pack(side="left")
+        self.status = ctk.CTkLabel(bot, text="", text_color=MUTED, font=ctk.CTkFont(size=11), anchor="w")
+        self.status.pack(side="left", padx=(4, 0))
+        self.watch_var = tk.BooleanVar(value=st.watch)
+        ctk.CTkSwitch(bot, text="Watch", variable=self.watch_var, command=self._toggle, width=40, text_color=TEXT,
+                      font=ctk.CTkFont(size=11), progress_color=GREEN, fg_color=ACCENT_DEEP).pack(side="right")
+        for w in (self, top, bot, self.img, self.name, self.mem, self.dot, self.status):
+            w.bind("<Button-1>", self._select)
+            w.bind("<Double-1>", lambda e: self.app.open_view(self.hwnd))
+
+    def _select(self, _e=None):
+        self.app.select(self.hwnd)
+
+    def _toggle(self):
+        self.app.set_watch(self.hwnd, bool(self.watch_var.get()))
+
+    def _menu(self):
+        self.app.select(self.hwnd)
+        m = tk.Menu(self, tearoff=0, bg=PANEL2, fg=TEXT, activebackground=ACCENT_DEEP, activeforeground=TEXT, bd=0)
+        m.add_command(label="Open live view", command=self.app.on_view)
+        m.add_command(label="Test detection (no send)", command=self.app.on_test_read)
+        m.add_command(label="Rename…", command=self.app.on_rename)
+        m.add_command(label="Bring to front", command=self.app.on_front)
+        try:
+            m.tk_popup(self.menu_btn.winfo_rootx(), self.menu_btn.winfo_rooty() + self.menu_btn.winfo_height())
+        finally:
+            m.grab_release()
+
+    def refresh(self, st, mem, status, color, selected):
+        sig = (st.label, mem, status, color, selected, st.watch, st.hit)
+        if sig != self.last:
+            self.last = sig
+            self.name.configure(text=st.label[:18])
+            self.mem.configure(text=mem)
+            self.status.configure(text=status, text_color=color)
+            self.dot.configure(text_color=color)
+            self.configure(border_color=ACCENT if selected else (AMBER if (st.hit and st.watch) else BORDER))
+            if self.watch_var.get() != st.watch:
+                self.watch_var.set(st.watch)
+        if st.thumb is not None and st.thumb_v != self.seen_v:
+            self.seen_v = st.thumb_v
+            ci = ctk.CTkImage(light_image=st.thumb, dark_image=st.thumb, size=(self.W, self.H))
+            self.img.configure(image=ci, text="")
+            self.ci = ci
+
+
 class WinState:
     def __init__(self, hwnd, pid, label):
         self.hwnd, self.pid, self.label = hwnd, pid, label
@@ -546,6 +532,7 @@ class WinState:
         self.last_peek = 0.0
         self.gone_since = None
         self.dc_streak = self.dc_clear = 0
+        self.thumb, self.thumb_v, self.thumb_t = None, 0, 0.0
         self.last_txt = self.last_full = 0.0
         self.dc_sent = False
         self.hit = False
@@ -557,47 +544,13 @@ class WinState:
             self.proc = None
 
 
-class RoundButton(ctk.CTkFrame):
-    """A true circle button: a round frame with a centered label."""
-
-    def __init__(self, parent, text, command, size=84):
-        self._cmd, self._hover, self._base = command, ACCENT_HOT, ACCENT
-        super().__init__(parent, width=size, height=size, corner_radius=size // 2, fg_color=ACCENT)
-        self.pack_propagate(False)
-        self.lbl = ctk.CTkLabel(self, text=text, text_color=ON_ACCENT, font=ctk.CTkFont(size=15, weight="bold"))
-        self.lbl.place(relx=0.5, rely=0.5, anchor="center")
-        for w in (self, self.lbl):
-            w.bind("<Button-1>", lambda e: self._cmd())
-            w.bind("<Enter>", lambda e: super(RoundButton, self).configure(fg_color=self._hover))
-            w.bind("<Leave>", lambda e: super(RoundButton, self).configure(fg_color=self._base))
-            w.configure(cursor="hand2")
-
-    def configure(self, **kw):
-        if "text" in kw:
-            self.lbl.configure(text=kw.pop("text"))
-        if "text_color" in kw:
-            self.lbl.configure(text_color=kw.pop("text_color"))
-        if "hover_color" in kw:
-            self._hover = kw.pop("hover_color")
-        if "fg_color" in kw:
-            self._base = kw["fg_color"]
-        if kw:
-            super().configure(**kw)
-
-
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.title("Secret Hatch Notifer+")
-        try:  # size the window to the screen so the whole UI fits without going fullscreen
-            sc = self._get_window_scaling()
-        except Exception:
-            sc = 1.0
-        w = int(min(1060, self.winfo_screenwidth() / sc * 0.94))
-        h = int(min(700, self.winfo_screenheight() / sc * 0.86))
-        self.geometry(f"{w}x{h}+{max(0, int((self.winfo_screenwidth() / sc - w) / 2))}+{max(0, int((self.winfo_screenheight() / sc - h) / 2 - 20))}")
-        self.minsize(min(880, w), min(520, h))
+        self.geometry("1320x820")
+        self.minsize(1120, 700)
         self.configure(fg_color=BG)
         try:  # CustomTkinter sets its own icon after startup, so set ours slightly later
             self.after(250, lambda: self.iconbitmap(resource_path("icon.ico")))
@@ -616,264 +569,279 @@ class App(ctk.CTk):
         self.stats = load_stats()
         self.stats_lock = threading.Lock()
         self.session = {}
-        self.update_info = None
-        self.page = "Watcher"
-        init_sounds()
         self._tick_n = 0
         self._last_saved = None
+        self.page, self.selected = "workspace", None
+        self.cards, self.card_order, self.pages, self.nav, self.kv = {}, [], {}, {}, {}
+        self.dc_count = self.fail_count = 0
+        self.update_info, self._updating = None, False
         self._build_ui()
         self._sync()
-        self.show_page("Watcher", quiet=True)
         self.scan_windows()
         self.after(700, self._tick)
         self.after(4000, self._periodic_update_check)
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._preview_worker, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Ready. Enter your Discord ID, then press START.")
 
     # ------------------------------------------------------------------ UI
-    def _card(self, parent, accent=False, glow=None):
-        return ctk.CTkFrame(parent, fg_color=BANNER if accent else PANEL, corner_radius=14,
-                            border_width=2 if (glow or accent) else 1,
-                            border_color=glow or (ACCENT_DEEP if accent else BORDER))
+    def _click(self):
+        if self.settings.get("sound_ui", True):
+            play_sound()
 
-    def _btn(self, parent, text, cmd, primary=False, width=None, height=34, kind=None):
-        def run():
-            play_sound("click")
+    def _snd(self, cmd):
+        def inner():
+            self._click()
             cmd()
-        kw = dict(text=text, command=run, corner_radius=10, height=height)
+        return inner
+
+    def _card(self, parent, accent=False):
+        return ctk.CTkFrame(parent, fg_color=BANNER if accent else PANEL, border_width=1,
+                            border_color=ACCENT_DEEP if accent else BORDER, corner_radius=12)
+
+    def _btn(self, parent, text, cmd, primary=False, width=None, height=34):
+        kw = dict(text=text, command=self._snd(cmd), corner_radius=8, height=height)
         if width:
             kw["width"] = width
         if primary:
             return ctk.CTkButton(parent, fg_color=ACCENT, hover_color=ACCENT_HOT, text_color=ON_ACCENT,
                                  font=ctk.CTkFont(weight="bold"), **kw)
-        if kind == "violet":
-            return ctk.CTkButton(parent, fg_color=VIOLET, hover_color=BLUE, text_color="#ffffff",
-                                 font=ctk.CTkFont(weight="bold"), **kw)
-        return ctk.CTkButton(parent, fg_color=PANEL2, hover_color=SELECT, border_width=1,
+        return ctk.CTkButton(parent, fg_color=PANEL2, hover_color=ACCENT_DEEP, border_width=1,
                              border_color=BORDER, text_color=TEXT, **kw)
 
-    def _label(self, parent, text, size=11, color=MUTED, bold=False, **kw):
+    def _label(self, parent, text, size=11, color=MUTED, bold=False):
         return ctk.CTkLabel(parent, text=text, text_color=color,
-                            font=ctk.CTkFont(size=size, weight="bold" if bold else "normal"), **kw)
+                            font=ctk.CTkFont(size=size, weight="bold" if bold else "normal"))
 
-    def _switch(self, parent, text, var):
-        return ctk.CTkSwitch(parent, text=text, variable=var, text_color=TEXT, progress_color=ACCENT,
-                             button_color=TEXT, button_hover_color="#ffffff", fg_color=BORDER,
-                             command=self._on_opt)
+    def _checkbox(self, parent, text, var):
+        def cmd():
+            self._click()
+            self._sync()
+        return ctk.CTkCheckBox(parent, text=text, variable=var, text_color=TEXT, fg_color=ACCENT,
+                               checkmark_color=ON_ACCENT, hover_color=ACCENT_HOT, border_color=BORDER, command=cmd)
 
-    def _on_opt(self):
-        play_sound("toggle")
-        self._sync()
+    def _page(self, key, title):
+        page = ctk.CTkFrame(self.content, fg_color=BG)
+        page.grid(row=0, column=0, sticky="nsew")
+        self.pages[key] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+        self._label(page, title, 22, TEXT, True).grid(row=0, column=0, sticky="w", padx=26, pady=(22, 8))
+        body = ctk.CTkFrame(page, fg_color=BG)
+        body.grid(row=1, column=0, sticky="nsew", padx=26, pady=(0, 18))
+        return body
 
-    def _gauge(self, parent, key, title, color):
-        box = ctk.CTkFrame(parent, fg_color=PANEL)
-        ring = ctk.CTkFrame(box, width=92, height=92, corner_radius=46, fg_color=PANEL2,
-                            border_width=4, border_color=color)
-        ring.pack()
-        ring.pack_propagate(False)
-        self.big[key] = ctk.CTkLabel(ring, text="0", text_color=TEXT, font=ctk.CTkFont(size=28, weight="bold"))
-        self.big[key].place(relx=0.5, rely=0.5, anchor="center")
-        self._label(box, title, 10, MUTED, True).pack(pady=(6, 0))
-        return box
-
-    def _build_ui(self):
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        self.big = {}
-
-        # ---- top navigation bar
-        nav = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=54)
-        nav.grid(row=0, column=0, sticky="ew")
-        nav.grid_columnconfigure(3, weight=1)
-        ctk.CTkFrame(nav, width=22, height=22, corner_radius=11, fg_color=ACCENT).grid(
-            row=0, column=0, padx=(20, 10), pady=16)
-        self._label(nav, "SECRET HATCH NOTIFER+", 15, TEXT, True).grid(row=0, column=1, sticky="w")
-        self._label(nav, f"v{APP_VERSION}", 10, MUTED).grid(row=0, column=2, sticky="w", padx=(8, 18))
-        self.nav_btns = {}
-        navbox = ctk.CTkFrame(nav, fg_color=PANEL)
-        navbox.grid(row=0, column=4, padx=(0, 10))
-        for i, name in enumerate(("Watcher", "Stats", "Settings")):
-            b = ctk.CTkButton(navbox, text=name, width=88, height=32, corner_radius=16,
-                              font=ctk.CTkFont(size=12, weight="bold"),
-                              command=lambda n=name: self.show_page(n))
-            b.grid(row=0, column=i, padx=3)
-            self.nav_btns[name] = b
-        self.update_btn = ctk.CTkButton(nav, text="", corner_radius=16, height=32, fg_color=VIOLET, hover_color=BLUE,
-                                        text_color="#ffffff", font=ctk.CTkFont(size=12, weight="bold"))
-        self.update_btn.grid(row=0, column=5, padx=(0, 10))
-        self.update_btn.grid_remove()
-        self.state_pill = ctk.CTkLabel(nav, text="  ● STOPPED  ", text_color=MUTED, fg_color=PANEL2,
-                                       corner_radius=14, height=30, font=ctk.CTkFont(size=12, weight="bold"))
-        self.state_pill.grid(row=0, column=6, padx=(0, 20))
-        ctk.CTkFrame(self, height=2, corner_radius=0, fg_color=BORDER).grid(row=0, column=0, sticky="sew")
-
-        # ---- pages (scrollable, so nothing is ever cut off in a small window)
-        self.body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        self.body.grid(row=1, column=0, sticky="nsew")
-        self.body.grid_columnconfigure(0, weight=1)
-        self.body.grid_rowconfigure(0, weight=1)
-        self.pages = {}
-        for name in ("Watcher", "Stats", "Settings"):
-            pg = ctk.CTkScrollableFrame(self.body, fg_color=BG, corner_radius=0, scrollbar_button_color=BORDER,
-                                        scrollbar_button_hover_color=ACCENT_DEEP)
-            pg.grid(row=0, column=0, sticky="nsew", padx=(14, 6), pady=(10, 8))
-            self.pages[name] = pg
-        self._build_watcher(self.pages["Watcher"])
-        self._build_stats(self.pages["Stats"])
-        self._build_settings(self.pages["Settings"])
-
-    def show_page(self, name, quiet=False):
-        if not quiet:
-            play_sound("click")
+    def show_page(self, name):
         self.page = name
-        for n, pg in self.pages.items():
-            if n == name:
+        for k, pg in self.pages.items():
+            if k == name:
                 pg.grid()
             else:
                 pg.grid_remove()
-        for n, b in self.nav_btns.items():
-            on = n == name
-            b.configure(fg_color=ACCENT if on else PANEL2, hover_color=ACCENT_HOT if on else SELECT,
-                        text_color=ON_ACCENT if on else TEXT)
-        if name == "Stats":
-            self.refresh_stats(True)
+        for k, b in self.nav.items():
+            b.configure(fg_color=PANEL2 if k == name else "transparent", text_color=TEXT if k == name else MUTED)
+        if name == "stats":
+            self.refresh_stats()
 
-    def _build_watcher(self, pg):
-        pg.grid_columnconfigure(0, weight=0, minsize=330)
-        pg.grid_columnconfigure(1, weight=1)
-        left = ctk.CTkFrame(pg, fg_color=BG)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        right = ctk.CTkFrame(pg, fg_color=BG)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
+    def _build_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        # ================= LEFT: control + counters =================
-        ctl = self._card(left, glow=ACCENT)
-        ctl.pack(fill="x", pady=(0, 10))
-        self._label(ctl, "CONTROL CENTER", 10, ACCENT, True).pack(anchor="w", padx=16, pady=(12, 0))
-        self._label(ctl, "Your Discord user ID", 14, TEXT, True).pack(anchor="w", padx=16)
-        self.id_var = ctk.StringVar(value=self.cfg["discord_id"])
-        ctk.CTkEntry(ctl, textvariable=self.id_var, fg_color=PANEL2, border_color=BORDER, height=36, corner_radius=10,
-                     placeholder_text="e.g. 123456789012345678").pack(fill="x", padx=16, pady=(6, 0))
-        self._label(ctl, "Discord → Settings → Advanced → Developer Mode ON, then right-click your name → Copy User ID.",
-                    9, wraplength=290, justify="left").pack(anchor="w", padx=16, pady=(5, 8))
-        row = ctk.CTkFrame(ctl, fg_color=BANNER)
-        row.pack(fill="x", padx=16, pady=(0, 6))
-        self.start_btn = RoundButton(row, "START", self.on_toggle, size=84)
-        self.start_btn.pack(side="left")
-        col = ctk.CTkFrame(row, fg_color=BANNER)
-        col.pack(side="left", fill="x", expand=True, padx=(14, 0))
-        self._btn(col, "Send test alert", self.on_test_alert, height=36).pack(fill="x")
-        self._btn(col, "View screen", self.on_view, kind="violet", height=32).pack(fill="x", pady=(8, 0))
-        self._label(ctl, "Only a picture of the Roblox window goes to the shared channel, and only when a secret is "
-                         "detected or you press a test button.",
-                    9, wraplength=290, justify="left").pack(anchor="w", padx=16, pady=(4, 12))
+        # ---- left sidebar
+        sb = ctk.CTkFrame(self, fg_color=SIDEBAR, corner_radius=0, width=220)
+        sb.grid(row=0, column=0, sticky="nsw")
+        sb.grid_propagate(False)
+        sb.grid_rowconfigure(10, weight=1)
+        self._label(sb, "SECRET HATCH", 15, TEXT, True).grid(row=0, column=0, sticky="w", padx=20, pady=(22, 0))
+        self._label(sb, "NOTIFER+", 15, TEXT, True).grid(row=1, column=0, sticky="w", padx=20)
+        self._label(sb, "SECRET ALERTS MANAGER", 9, MUTED, True).grid(row=2, column=0, sticky="w", padx=20, pady=(0, 18))
+        for i, (key, text) in enumerate((("workspace", "▣   Live workspace"), ("stats", "▤   Stats"),
+                                         ("activity", "☰   Activity log"), ("settings", "⚙   Settings"))):
+            b = ctk.CTkButton(sb, text=text, anchor="w", height=40, corner_radius=8, fg_color="transparent",
+                              hover_color=PANEL2, text_color=MUTED, font=ctk.CTkFont(size=13),
+                              command=self._snd(lambda k=key: self.show_page(k)))
+            b.grid(row=3 + i, column=0, sticky="ew", padx=12, pady=2)
+            self.nav[key] = b
+        self.state_pill = ctk.CTkLabel(sb, text="●  STOPPED", text_color=MUTED, fg_color=PANEL2, corner_radius=10,
+                                       height=34, font=ctk.CTkFont(size=12, weight="bold"))
+        self.state_pill.grid(row=11, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self.update_btn = ctk.CTkButton(sb, text="", corner_radius=8, height=36, fg_color=AMBER, hover_color="#ffd25e",
+                                        text_color="#1a1200", font=ctk.CTkFont(size=12, weight="bold"),
+                                        command=self.on_update_click)
+        self.update_btn.grid(row=12, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self.update_btn.grid_remove()
+        self._label(sb, f"v{APP_VERSION}", 10, MUTED).grid(row=13, column=0, sticky="w", padx=20, pady=(0, 16))
+        sb.grid_columnconfigure(0, weight=1)
 
-        gc = self._card(left)
-        gc.pack(fill="x")
-        gc.grid_columnconfigure((0, 1, 2), weight=1, uniform="g")
-        self._gauge(gc, "today", "TODAY", ACCENT).grid(row=0, column=0, pady=12)
-        self._gauge(gc, "session", "SESSION", VIOLET).grid(row=0, column=1, pady=12)
-        self._gauge(gc, "total", "ALL TIME", BLUE).grid(row=0, column=2, pady=12)
+        # ---- pages
+        self.content = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.content.grid(row=0, column=1, sticky="nsew")
+        self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_rowconfigure(0, weight=1)
+        self._build_workspace(self._page("workspace", "Live workspace"))
+        self._build_stats(self._page("stats", "Stats"))
+        self._build_activity(self._page("activity", "Activity log"))
+        self._build_settings(self._page("settings", "Settings"))
 
-        # ================= RIGHT: windows + activity =================
-        mid = self._card(right)
-        mid.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
-        mid.grid_columnconfigure(0, weight=1)
-        self._label(mid, "Roblox windows", 14, TEXT, True).grid(row=0, column=0, sticky="w", padx=16, pady=(12, 0))
-        self._label(mid, "Click ☑ to pick windows to watch. Double-click a name to rename it.",
-                    10).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 6))
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=28,
-                        borderwidth=0, bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", background=PANEL2, foreground=ACCENT, relief="flat",
+        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=30,
+                        borderwidth=0, font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", background=PANEL2, foreground=MUTED, relief="flat",
                         font=("Segoe UI", 9, "bold"))
-        style.map("Treeview", background=[("selected", SELECT)], foreground=[("selected", TEXT)])
-        wrap = ctk.CTkFrame(mid, fg_color=PANEL, corner_radius=0)
-        wrap.grid(row=2, column=0, sticky="nsew", padx=14)
-        wrap.grid_columnconfigure(0, weight=1)
-        cols = ("watch", "name", "pid", "mem", "cpu", "up", "status")
-        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse", height=5)
-        for c, t, w, a in (("watch", "Watch", 58, "center"), ("name", "Account", 105, "w"),
-                           ("pid", "PID", 55, "center"), ("mem", "Memory", 70, "center"),
-                           ("cpu", "CPU", 50, "center"), ("up", "Uptime", 68, "center"),
-                           ("status", "Status", 150, "w")):
-            self.tree.heading(c, text=t)
-            self.tree.column(c, width=w, anchor=a, stretch=(c == "status"), minwidth=40)
-        self.tree.tag_configure("hit", foreground=ACCENT_HOT)
-        self.tree.tag_configure("off", foreground=MUTED)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        self.tree.bind("<Button-1>", self._on_tree_click)
-        self.tree.bind("<Double-1>", lambda e: self.on_rename())
-        bar = ctk.CTkFrame(mid, fg_color=PANEL)
-        bar.grid(row=3, column=0, sticky="ew", padx=14, pady=(10, 12))
-        self._btn(bar, "Scan now", self.scan_windows, primary=True, width=90).pack(side="left", padx=(0, 5))
-        self._btn(bar, "Test detection", self.on_test_read, width=116).pack(side="left", padx=3)
-        self._btn(bar, "Rename", self.on_rename, width=74).pack(side="left", padx=3)
-        self._btn(bar, "To front", self.on_front, width=76).pack(side="left", padx=3)
-        self._btn(bar, "All", lambda: self._set_all(True), width=44).pack(side="left", padx=3)
-        self._btn(bar, "None", lambda: self._set_all(False), width=52).pack(side="left", padx=3)
+        style.map("Treeview", background=[("selected", ACCENT_DEEP)], foreground=[("selected", TEXT)])
+        self.show_page("workspace")
 
-        lg = self._card(right)
-        lg.grid(row=1, column=0, sticky="nsew")
-        self._label(lg, "Activity", 14, TEXT, True).pack(anchor="w", padx=16, pady=(10, 0))
-        self.logbox = ctk.CTkTextbox(lg, height=96, fg_color=PANEL2, text_color=TEXT, border_width=0, corner_radius=10,
-                                     font=ctk.CTkFont(family="Consolas", size=11), wrap="word")
-        self.logbox.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+    # ---- Live workspace: control row, counters, account cards with live previews, overview on the right
+    def _build_workspace(self, body):
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, minsize=270)
+        body.grid_rowconfigure(0, weight=1)
+        main = ctk.CTkFrame(body, fg_color=BG)
+        main.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(3, weight=1)
+        side = ctk.CTkFrame(body, fg_color=BG)
+        side.grid(row=0, column=1, sticky="nsew")
+
+        # control row
+        ctl = self._card(main)
+        ctl.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ctl.grid_columnconfigure(0, weight=1)
+        self._label(ctl, "YOUR DISCORD USER ID  (you get pinged when YOUR account hatches a secret)", 10, MUTED, True
+                    ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(12, 4))
+        self.id_var = ctk.StringVar(value=self.cfg["discord_id"])
+        ctk.CTkEntry(ctl, textvariable=self.id_var, fg_color=PANEL2, border_color=BORDER, height=38,
+                     placeholder_text="e.g. 123456789012345678").grid(row=1, column=0, sticky="ew", padx=(16, 8))
+        self.start_btn = self._btn(ctl, "START", self.on_toggle, primary=True, width=120, height=38)
+        self.start_btn.grid(row=1, column=1, padx=4)
+        self._btn(ctl, "Send test alert", self.on_test_alert, width=130, height=38).grid(row=1, column=2, padx=(4, 16))
+        self._label(ctl, "Discord → Settings → Advanced → Developer Mode ON, then right-click your name → Copy User ID.  "
+                         "Alerts show only the Roblox window, never your desktop.", 10, MUTED
+                    ).grid(row=2, column=0, columnspan=3, sticky="w", padx=16, pady=(6, 12))
+
+        # counters
+        cnt = ctk.CTkFrame(main, fg_color=BG)
+        cnt.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        cnt.grid_columnconfigure((0, 1, 2), weight=1, uniform="c")
+        self.big = {}
+        for i, (key, title) in enumerate((("today", "secrets today"), ("session", "this session"), ("total", "all time"))):
+            self.big[key] = StatCard(cnt, title)
+            self.big[key].grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0 if i == 2 else 6))
+
+        # workspace header
+        hd = ctk.CTkFrame(main, fg_color=BG)
+        hd.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        hd.grid_columnconfigure(0, weight=1)
+        self._label(hd, "Your workspace", 16, TEXT, True).grid(row=0, column=0, sticky="w")
+        self._label(hd, "Click a card to select it  •  double-click to open its live view", 10, MUTED
+                    ).grid(row=1, column=0, sticky="w")
+        bar = ctk.CTkFrame(hd, fg_color=BG)
+        bar.grid(row=0, column=1, rowspan=2, sticky="e")
+        self._btn(bar, "Scan for windows", self.scan_windows).pack(side="left", padx=3)
+        self._btn(bar, "Open live view", self.on_view).pack(side="left", padx=3)
+        self._btn(bar, "Test detection", self.on_test_read).pack(side="left", padx=3)
+        self._btn(bar, "Watch all", lambda: self._set_all(True)).pack(side="left", padx=3)
+        self._btn(bar, "None", lambda: self._set_all(False), width=56).pack(side="left", padx=(3, 0))
+
+        # cards grid
+        self.grid_area = ctk.CTkScrollableFrame(main, fg_color=PANEL, border_width=1, border_color=BORDER, corner_radius=12)
+        self.grid_area.grid(row=3, column=0, sticky="nsew")
+        self.grid_area.grid_columnconfigure((0, 1, 2), weight=1)
+        self.empty_lbl = ctk.CTkLabel(self.grid_area, text="No Roblox windows found yet.\nOpen Roblox, then press “Scan for windows”.",
+                                      text_color=MUTED, font=ctk.CTkFont(size=13))
+        self.empty_lbl.grid(row=0, column=0, columnspan=3, pady=60)
+
+        # overview column
+        top = self._card(side, accent=True)
+        top.pack(fill="x", pady=(0, 10))
+        self.ov_big = ctk.CTkLabel(top, text="0 / 0", text_color=TEXT, font=ctk.CTkFont(size=30, weight="bold"))
+        self.ov_big.pack(anchor="w", padx=16, pady=(14, 0))
+        self._label(top, "accounts being watched", 11, MUTED).pack(anchor="w", padx=16, pady=(0, 14))
+        self._kv_block(side, "WINDOWS", (("w_watch", "Watching"), ("w_secret", "Secret on screen"),
+                                         ("w_dc", "Disconnected?"), ("w_min", "Minimized"), ("w_off", "Not watching")))
+        self._kv_block(side, "THIS PC", (("pc_rob", "Roblox RAM"), ("pc_free", "Free RAM"), ("pc_cpu", "CPU")))
+        self._kv_block(side, "SINCE YOU OPENED THIS APP", (("s_secrets", "Secrets found"), ("s_dc", "Disconnect warnings"),
+                                                           ("s_fail", "Failed alerts")))
+
+    def _kv_block(self, parent, title, rows):
+        c = self._card(parent)
+        c.pack(fill="x", pady=(0, 10))
+        self._label(c, title, 10, MUTED, True).pack(anchor="w", padx=16, pady=(12, 4))
+        for key, text in rows:
+            r = ctk.CTkFrame(c, fg_color="transparent")
+            r.pack(fill="x", padx=16, pady=2)
+            self._label(r, text, 11, MUTED).pack(side="left")
+            v = self._label(r, "0", 11, TEXT, True)
+            v.pack(side="right")
+            self.kv[key] = v
+        ctk.CTkLabel(c, text="", height=6).pack()
+
+    def _build_activity(self, body):
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        lg = self._card(body)
+        lg.grid(row=0, column=0, sticky="nsew")
+        self.logbox = ctk.CTkTextbox(lg, fg_color=PANEL2, text_color=TEXT, border_width=0,
+                                     font=ctk.CTkFont(family="Consolas", size=12))
+        self.logbox.pack(fill="both", expand=True, padx=14, pady=14)
         self.logbox.configure(state="disabled")
 
-    def _build_settings(self, pg):
-        pg.grid_columnconfigure((0, 1), weight=1, uniform="s")
-
-        # ---- detection
-        d = self._card(pg)
-        d.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
-        self._label(d, "Detection", 15, TEXT, True).pack(anchor="w", padx=18, pady=(14, 0))
-        self._label(d, "How often and how carefully your Roblox windows are checked.", 10
-                    ).pack(anchor="w", padx=18, pady=(0, 8))
-        grid = ctk.CTkFrame(d, fg_color=PANEL)
-        grid.pack(fill="x", padx=18)
-        grid.grid_columnconfigure((0, 1), weight=1)
+    # ---- Settings
+    def _build_settings(self, body):
+        body.grid_columnconfigure((0, 1), weight=1, uniform="s")
         self.cool_var = ctk.StringVar(value=str(self.cfg["rearm"]))
         self.int_var = ctk.StringVar(value=str(self.cfg["interval"]))
-        self.rev_var = ctk.StringVar(value=str(self.cfg["reveal_delay"]))
         self.peek_var = ctk.StringVar(value=str(self.cfg["peek"]))
-        fields = (("RE-ARM AFTER EGG GONE (S)", self.cool_var), ("SCAN EVERY (S)", self.int_var),
-                  ("REVEAL PIC AFTER (S)", self.rev_var), ("CHECK MINIMIZED EVERY (S)", self.peek_var))
-        for i, (txt, var) in enumerate(fields):
-            r, c = divmod(i, 2)
-            self._label(grid, txt, 9, MUTED, True).grid(row=r * 2, column=c, sticky="w",
-                                                         padx=(0, 8) if c == 0 else (8, 0), pady=(0 if r == 0 else 10, 0))
-            ctk.CTkEntry(grid, textvariable=var, fg_color=PANEL2, border_color=BORDER, height=32, corner_radius=8
-                         ).grid(row=r * 2 + 1, column=c, sticky="ew", padx=(0, 8) if c == 0 else (8, 0))
+        self.rev_var = ctk.StringVar(value=str(self.cfg["reveal_delay"]))
         self.min_var = ctk.BooleanVar(value=self.cfg["minimized"])
         self.full_var = ctk.BooleanVar(value=self.cfg["fullsize"])
         self.dc_var = ctk.BooleanVar(value=self.cfg["dc_warn"])
         self.rev_pic_var = ctk.BooleanVar(value=self.cfg["reveal_pic"])
-        sw = ctk.CTkFrame(d, fg_color=PANEL)
-        sw.pack(fill="x", padx=18, pady=(16, 16))
-        for txt, var in (("Scan minimized windows too", self.min_var), ("Scan small windows at full size", self.full_var),
-                         ("Warn me if an account disconnects", self.dc_var),
-                         ("Also send a 2nd picture after reveal", self.rev_pic_var)):
-            self._switch(sw, txt, var).pack(anchor="w", pady=5)
+        self.sound_ui_var = ctk.BooleanVar(value=self.cfg["sound_ui"])
+        self.sound_alert_var = ctk.BooleanVar(value=self.cfg["sound_alert"])
 
-        # ---- app
-        a = self._card(pg)
-        a.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
-        self._label(a, "App", 15, TEXT, True).pack(anchor="w", padx=18, pady=(14, 8))
-        self.sound_var = ctk.BooleanVar(value=self.cfg["sounds"])
-        sw2 = ctk.CTkFrame(a, fg_color=PANEL)
-        sw2.pack(fill="x", padx=18)
-        self._switch(sw2, "UI button sounds", self.sound_var).pack(anchor="w", pady=4)
-        self._label(a, "UPDATES", 9, MUTED, True).pack(anchor="w", padx=18, pady=(16, 2))
-        self._label(a, f"You have v{APP_VERSION}.", 12, TEXT).pack(anchor="w", padx=18)
-        self.update_note = self._label(a, "Updates install from inside the app: when one is out, a purple "
-                                          "button appears at the top. Click it, then Yes.",
-                                       10, wraplength=330, justify="left")
-        self.update_note.pack(anchor="w", padx=18, pady=(2, 8))
-        self._btn(a, "Check for updates", lambda: self.check_updates(True), primary=True).pack(anchor="w", padx=18, pady=(0, 16))
+        tm = self._card(body)
+        tm.grid(row=0, column=0, sticky="nsew", padx=(0, 7), pady=(0, 14))
+        self._label(tm, "TIMING", 10, MUTED, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 0))
+        for i, (txt, var) in enumerate((("RE-ARM AFTER SECRET IS GONE (SEC)", self.cool_var),
+                                        ("SCAN EVERY (SEC)", self.int_var),
+                                        ("CHECK MINIMIZED EVERY (SEC)", self.peek_var),
+                                        ("2ND PICTURE AFTER (SEC)", self.rev_var))):
+            self._label(tm, txt, 9, MUTED, True).grid(row=1 + i * 2, column=0, sticky="w", padx=18, pady=(10, 0))
+            ctk.CTkEntry(tm, textvariable=var, fg_color=PANEL2, border_color=BORDER, height=32,
+                         width=170).grid(row=2 + i * 2, column=0, sticky="w", padx=18)
+        ctk.CTkLabel(tm, text="", height=8).grid(row=20, column=0)
+
+        op = self._card(body)
+        op.grid(row=0, column=1, sticky="nsew", padx=(7, 0), pady=(0, 14))
+        self._label(op, "OPTIONS", 10, MUTED, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 8))
+        for i, (txt, var) in enumerate((("Scan minimized windows too", self.min_var),
+                                        ("Scan small windows at full size", self.full_var),
+                                        ("Warn me if an account disconnects", self.dc_var),
+                                        ("Also send a 2nd picture after reveal", self.rev_pic_var),
+                                        ("Play a sound when a secret is found", self.sound_alert_var),
+                                        ("Click sounds on buttons", self.sound_ui_var))):
+            self._checkbox(op, txt, var).grid(row=1 + i, column=0, sticky="w", padx=18, pady=7)
+        self._btn(op, "Test sound", play_sound, width=110).grid(row=8, column=0, sticky="w", padx=18, pady=(6, 16))
+
+        ab = self._card(body)
+        ab.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self._label(ab, "ABOUT & UPDATES", 10, MUTED, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 2))
+        self._label(ab, f"Secret Hatch Notifer+  v{APP_VERSION}.  Checks for new versions on start and every 6 hours. "
+                        "When one is out, an “Update” button appears bottom-left: click it and the app updates itself.",
+                    11, TEXT).grid(row=1, column=0, sticky="w", padx=18)
+        btns = ctk.CTkFrame(ab, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="w", padx=18, pady=(10, 16))
+        self._btn(btns, "Check for updates", lambda: self.check_updates(True), primary=True).pack(side="left", padx=(0, 6))
+        self._btn(btns, "Open data folder", self.on_open_data).pack(side="left", padx=3)
+
+    def on_open_data(self):
+        try:
+            os.startfile(APP_DIR)
+        except Exception as e:
+            self.log(f"Couldn't open the folder: {e}")
 
     # ------------------------------------------------------------- logging
     def log(self, msg):
@@ -904,9 +872,9 @@ class App(ctk.CTk):
         snap = {"discord_id": self.id_var.get().strip(), "rearm": self._num(self.cool_var, 6, 3),
                 "interval": self._num(self.int_var, 1.0, 0.2), "peek": self._num(self.peek_var, 5, 2),
                 "minimized": bool(self.min_var.get()), "fullsize": bool(self.full_var.get()), "dc_warn": bool(self.dc_var.get()), "reveal_pic": bool(self.rev_pic_var.get()),
-                "reveal_delay": self._num(self.rev_var, 8, 1), "sounds": bool(self.sound_var.get())}
+                "sound_ui": bool(self.sound_ui_var.get()), "sound_alert": bool(self.sound_alert_var.get()),
+                "reveal_delay": self._num(self.rev_var, 8, 1)}
         self.settings = snap
-        set_sounds(snap["sounds"])
         if snap != self._last_saved:
             self._last_saved = dict(snap)
             save_config(snap)
@@ -915,7 +883,6 @@ class App(ctk.CTk):
         self._sync()
         if not ID_RE.match(self.settings["discord_id"]):
             self.log("Enter a valid Discord user ID first (17-20 digits).")
-            play_sound("error")
             return False
         return True
 
@@ -923,45 +890,47 @@ class App(ctk.CTk):
         if not self.running and not self._valid_id():
             return
         self.running = not self.running
-        play_sound("start" if self.running else "stop")
         for st in self.states.values():
             st.armed, st.streak, st.gone_since, st.hit = True, 0, None, False
-        if self.running:
-            self.start_btn.configure(text="STOP", fg_color=VIOLET, hover_color=BLUE, text_color="#ffffff")
-        else:
-            self.start_btn.configure(text="START", fg_color=ACCENT, hover_color=ACCENT_HOT, text_color=ON_ACCENT)
-        self.state_pill.configure(text="  ● WATCHING  " if self.running else "  ● STOPPED  ",
+        self.start_btn.configure(text="STOP" if self.running else "START",
+                                 fg_color=DANGER if self.running else ACCENT,
+                                 text_color="#ffffff" if self.running else ON_ACCENT)
+        self.state_pill.configure(text="●  WATCHING" if self.running else "●  STOPPED",
                                   text_color=GREEN if self.running else MUTED)
         self.log("Watching started." if self.running else "Watching stopped.")
 
+    # ------------------------------------------------------------- windows
     # ---------------------------------------------------------------- stats
-    def _build_stats(self, pg):
-        pg.grid_columnconfigure((0, 1), weight=1, uniform="s")
+    def _build_stats(self, tab):
+        tab.grid_columnconfigure((0, 1), weight=1)
+        tab.grid_rowconfigure(0, weight=1)
 
-        def table(col, cols, widths, title):
-            card = self._card(pg)
-            card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 6 if col == 0 else 0), pady=(0, 10))
+        def table(parent, cols, widths, title):
+            card = self._card(parent)
             card.grid_columnconfigure(0, weight=1)
-            self._label(card, title, 15, TEXT, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 6))
-            tv = ttk.Treeview(card, columns=[c[0] for c in cols], show="headings", height=12)
+            card.grid_rowconfigure(1, weight=1)
+            self._label(card, title, 10, MUTED, True).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 6))
+            tv = ttk.Treeview(card, columns=[c[0] for c in cols], show="headings", height=10)
             for (cid, name, anchor), w in zip(cols, widths):
                 tv.heading(cid, text=name)
-                tv.column(cid, width=w, anchor=anchor, stretch=(cid == cols[0][0]), minwidth=40)
+                tv.column(cid, width=w, anchor=anchor, stretch=(cid == cols[0][0]))
             tv.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
-            return tv
+            return card, tv
 
-        self.acct_tree = table(0, (("a", "Account", "w"), ("t", "Today", "center"), ("s", "Session", "center"),
-                                   ("all", "Total", "center"), ("l", "Last secret", "center")),
-                               (130, 55, 65, 55, 120), "Per account")
-        self.recent_tree = table(1, (("when", "When", "w"), ("acc", "Account", "w")), (160, 140), "Recent secrets")
-        bar = self._card(pg)
-        bar.grid(row=1, column=0, columnspan=2, sticky="ew")
-        inner = ctk.CTkFrame(bar, fg_color=PANEL)
-        inner.pack(fill="x", padx=14, pady=12)
-        self._btn(inner, "Export CSV", self.on_export_stats).pack(side="left", padx=(0, 6))
-        self._btn(inner, "Reset session", self.on_reset_session).pack(side="left", padx=3)
-        self._btn(inner, "Clear secret history", self.on_clear_stats, primary=True).pack(side="left", padx=3)
-        self._label(inner, "Real secret detections only (tests aren't counted).", 10).pack(side="right")
+        c1, self.acct_tree = table(tab, (("a", "Account", "w"), ("t", "Today", "center"), ("s", "Session", "center"),
+                                         ("all", "Total", "center"), ("l", "Last secret", "center")),
+                                   (150, 60, 70, 60, 130), "PER ACCOUNT")
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        c2, self.recent_tree = table(tab, (("when", "When", "w"), ("acc", "Account", "w")), (160, 150), "RECENT SECRETS")
+        c2.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        bar = ctk.CTkFrame(tab, fg_color=BG)
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 4))
+        self._btn(bar, "Export CSV", self.on_export_stats).pack(side="left", padx=(0, 6))
+        self._btn(bar, "Reset session", self.on_reset_session).pack(side="left", padx=3)
+        ctk.CTkButton(bar, text="Clear secret history", command=self.on_clear_stats, corner_radius=9, height=34,
+                      fg_color=DANGER, hover_color="#ff6b6f", text_color="#fff",
+                      font=ctk.CTkFont(weight="bold")).pack(side="left", padx=3)
+        self._label(bar, "Counts real secret detections only (test alerts aren't counted).", 10).pack(side="right")
 
     def record_hatch(self, label):
         with self.stats_lock:
@@ -981,7 +950,7 @@ class App(ctk.CTk):
         with self.stats_lock:
             return sum(1 for h in self.stats["history"] if datetime.datetime.fromtimestamp(h["t"]).date() == today)
 
-    def refresh_stats(self, tables=True):
+    def refresh_stats(self):
         with self.stats_lock:
             hist, accts, total = list(self.stats["history"]), dict(self.stats["accounts"]), self.stats["total"]
         today = datetime.date.today()
@@ -992,10 +961,10 @@ class App(ctk.CTk):
             if d.date() == today:
                 tcount += 1
                 per_today[h["account"]] = per_today.get(h["account"], 0) + 1
-        self.big["today"].configure(text=str(tcount))
-        self.big["session"].configure(text=str(sum(self.session.values())))
-        self.big["total"].configure(text=str(total))
-        if not tables:
+        self.big["today"].set(tcount)
+        self.big["session"].set(sum(self.session.values()))
+        self.big["total"].set(total)
+        if self.page != "stats":
             return
         names = sorted(set(accts) | set(self.session) | {x.label for x in self.states.values()})
         self.acct_tree.delete(*self.acct_tree.get_children())
@@ -1056,46 +1025,109 @@ class App(ctk.CTk):
                                      args=(gone.label, "Roblox window closed (crashed or was closed)", None, dict(self.settings)),
                                      daemon=True).start()
                 del self.states[hwnd]
-                if self.tree.exists(str(hwnd)):
-                    self.tree.delete(str(hwnd))
+                card = self.cards.pop(hwnd, None)
+                if card is not None:
+                    card.destroy()
+                if hwnd in self.card_order:
+                    self.card_order.remove(hwnd)
+                if self.selected == hwnd:
+                    self.selected = None
+                self._layout_cards()
         self._refresh_table()
 
+    def _layout_cards(self):
+        for i, hwnd in enumerate(self.card_order):
+            c = self.cards.get(hwnd)
+            if c is not None:
+                c.grid(row=i // 3, column=i % 3, padx=7, pady=7, sticky="n")
+        if self.card_order:
+            self.empty_lbl.grid_remove()
+        else:
+            self.empty_lbl.grid()
+
+    def _status_of(self, st):
+        if not st.watch:
+            return "Not watching", MUTED
+        if st.hit:
+            return "SECRET!", AMBER
+        if st.dc_streak >= 2:
+            return "Disconnected?", DANGER
+        if not self.running:
+            return "Ready", MUTED
+        if st.status.startswith("(min)"):
+            return "Minimized", GREEN
+        if st.status.startswith("Can't") or st.status.startswith("Error"):
+            return st.status[:22], DANGER
+        return "Watching", GREEN
+
     def _refresh_table(self):
-        n = 0
+        n = secret = dc = mini = 0
+        rob = 0
         for hwnd, st in list(self.states.items()):
-            mem = cpu = up = "-"
+            if hwnd not in self.cards:
+                self.cards[hwnd] = AccountCard(self.grid_area, self, st)
+                self.card_order.append(hwnd)
+                self._layout_cards()
+            mem = "-"
             if st.proc is not None:
                 try:
-                    mem = f"{st.proc.memory_info().rss / 1048576:.0f} MB"
-                    cpu = f"{st.proc.cpu_percent(None) / max(1, psutil.cpu_count()):.1f}%"
-                    up = fmt_uptime(time.time() - st.proc.create_time())
+                    rss = st.proc.memory_info().rss
+                    rob += rss
+                    mem = f"{rss / 1048576:.0f} MB"
                 except Exception:
                     pass
-            status = st.status if st.watch else "Not watching"
-            tags = ("hit",) if (st.hit and st.watch) else (() if st.watch else ("off",))
-            vals = ("☑" if st.watch else "☐", st.label, st.pid, mem, cpu, up, status)
-            if self.tree.exists(str(hwnd)):
-                self.tree.item(str(hwnd), values=vals, tags=tags)
-            else:
-                self.tree.insert("", "end", iid=str(hwnd), values=vals, tags=tags)
-            n += 1 if st.watch else 0
-        self.title(f"Secret Hatch Notifer+ — watching {n} of {len(self.states)}  |  secrets today: {self._today_count()}")
+            text, color = self._status_of(st)
+            self.cards[hwnd].refresh(st, mem, text, color, hwnd == self.selected)
+            if st.watch:
+                n += 1
+                if st.hit:
+                    secret += 1
+                if st.dc_streak >= 2:
+                    dc += 1
+                if st.status.startswith("(min)"):
+                    mini += 1
+        total = len(self.states)
+        self.ov_big.configure(text=f"{n} / {total}")
+        vals = {"w_watch": n - secret - dc, "w_secret": secret, "w_dc": dc, "w_min": mini, "w_off": total - n,
+                "pc_rob": f"{rob / 1073741824:.1f} GB", "s_secrets": sum(self.session.values()),
+                "s_dc": self.dc_count, "s_fail": self.fail_count}
+        try:
+            vm = psutil.virtual_memory()
+            vals["pc_free"] = f"{vm.available / 1073741824:.1f} / {vm.total / 1073741824:.1f} GB"
+            vals["pc_cpu"] = f"{psutil.cpu_percent(None):.0f}%"
+        except Exception:
+            pass
+        for k, v in vals.items():
+            if k in self.kv:
+                self.kv[k].configure(text=str(v))
+        self.title(f"Secret Hatch Notifer+ — watching {n} of {total}  |  secrets today: {self._today_count()}")
+
+    def _pick(self):
+        st = self.states.get(self.selected)
+        if st is None and len(self.states) == 1:
+            st = next(iter(self.states.values()))
+        return st
 
     def _selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            self.log("Select a window in the list first.")
-            return None
-        return self.states.get(int(sel[0]))
+        st = self._pick()
+        if st is None:
+            self.log("Click an account card first.")
+        return st
 
-    def _on_tree_click(self, event):
-        if self.tree.identify_region(event.x, event.y) == "cell" and self.tree.identify_column(event.x) == "#1":
-            iid = self.tree.identify_row(event.y)
-            if iid and int(iid) in self.states:
-                st = self.states[int(iid)]
-                st.watch = not st.watch
-                st.armed, st.streak, st.gone_since, st.hit = True, 0, None, False
-                self._refresh_table()
+    def select(self, hwnd):
+        self.selected = hwnd
+        self._refresh_table()
+
+    def set_watch(self, hwnd, on):
+        st = self.states.get(hwnd)
+        if st:
+            st.watch = on
+            st.armed, st.streak, st.gone_since, st.hit = True, 0, None, False
+            self._refresh_table()
+
+    def open_view(self, hwnd):
+        self.selected = hwnd
+        self.on_view()
 
     def _set_all(self, on):
         for st in self.states.values():
@@ -1116,6 +1148,28 @@ class App(ctk.CTk):
         if name and name.strip():
             st.label = name.strip()[:40]
             self._refresh_table()
+
+    def _preview_worker(self):
+        """Keeps the card pictures fresh for windows the watcher isn't scanning right now."""
+        while not self.stop.is_set():
+            did = False
+            for st in list(self.states.values()):
+                if self.stop.is_set():
+                    break
+                if time.time() - st.thumb_t < 4.0:
+                    continue
+                try:
+                    if not win32gui.IsWindow(st.hwnd) or win32gui.IsIconic(st.hwnd):
+                        continue
+                    frame = snap_window(st.hwnd, allow_peek=False, full=False)
+                    if frame is not None and frame.size:
+                        st.thumb, st.thumb_t = make_thumb(frame), time.time()
+                        st.thumb_v += 1
+                except Exception:
+                    pass
+                did = True
+                time.sleep(0.4)
+            time.sleep(0.3 if did else 1.0)
 
     # ----------------------------------------------------------- detection
     def _get_ocr(self):
@@ -1186,6 +1240,12 @@ class App(ctk.CTk):
         peeked = minimized or small
         now = time.time()
         hit, why = False, ""
+        if now - st.thumb_t >= 2.0:
+            try:
+                st.thumb, st.thumb_t = make_thumb(frame), now
+                st.thumb_v += 1
+            except Exception:
+                pass
 
         # 1) fast check every scan: the black secret silhouette
         if find_black_egg(frame):
@@ -1247,6 +1307,8 @@ class App(ctk.CTk):
             if st.armed:  # one alert per secret: fire once, then stay quiet until it has been gone for a while
                 st.armed = False
                 self.log(f"{st.label}: SECRET detected ({why}). Sending to Discord…")
+                if s.get("sound_alert", True):
+                    play_sound()
                 counts = self.record_hatch(st.label)
                 threading.Thread(target=self._send_alert, args=(st, frame, s, False, counts), daemon=True).start()
         else:
@@ -1272,13 +1334,14 @@ class App(ctk.CTk):
                           "content": f"<@{uid}> {pre}🥚 **SECRET HATCH!**",
                           "embeds": [{"title": f"{pre}🔒 A secret is hatching!",
                                       "description": f"Account: **{label}**",
-                                      "color": 0xE11D2E, "image": {"url": "attachment://secret.jpg"},
+                                      "color": 0xFFA516, "image": {"url": "attachment://secret.jpg"},
                                       **({"footer": {"text": f"Secret #{counts['today']} today  •  #{counts['total']} all time  "
                                                              f"•  {label}: {counts['account_total']} total"}} if counts else {}),
                                       "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}]},
                          to_jpeg_bytes(frame), ping_id=uid)
             self.log(f"{pre}Alert + picture sent for {label}.")
         except Exception as e:
+            self.fail_count += 1
             self.log(f"Alert failed for {label}: {e}")
             return
         if is_test or st.hwnd == 0 or not s.get("reveal_pic"):
@@ -1290,7 +1353,7 @@ class App(ctk.CTk):
                 return
             post_discord({"username": "Secret Hatch Notifer+",
                           "embeds": [{"title": "✨ Secret revealed", "description": f"Account: **{label}**",
-                                      "color": 0x7F1520, "image": {"url": "attachment://secret.jpg"}}]},
+                                      "color": 0x2F6BFF, "image": {"url": "attachment://secret.jpg"}}]},
                          to_jpeg_bytes(f2))
             self.log(f"Reveal picture sent for {label}.")
         except Exception as e:
@@ -1302,7 +1365,7 @@ class App(ctk.CTk):
         if not ID_RE.match(uid or ""):
             return
         embed = {"title": "⚠️ Account needs attention", "description": f"Account: **{label}**\n{reason}",
-                 "color": 0xF59E0B, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+                 "color": 0xE5484D, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         img = None
         if frame is not None and getattr(frame, "size", 0):
             embed["image"] = {"url": "attachment://secret.jpg"}
@@ -1310,6 +1373,7 @@ class App(ctk.CTk):
         try:
             post_discord({"username": "Secret Hatch Notifer+", "content": f"<@{uid}> ⚠️ **{label}** {reason}",
                           "embeds": [embed]}, img, ping_id=uid)
+            self.dc_count += 1
             self.log(f"Warning sent: {label} {reason}")
         except Exception as e:
             self.log(f"Warning failed for {label}: {e}")
@@ -1321,8 +1385,7 @@ class App(ctk.CTk):
             self.log("Test alerts are limited to one every 20 seconds (it posts to the shared channel).")
             return
         self.last_test = time.time()
-        sel = self.tree.selection()
-        st = self.states.get(int(sel[0])) if sel else None
+        st = self._pick()
         if st is None and len(self.states) == 1:
             st = next(iter(self.states.values()))
         if st is None:
@@ -1345,8 +1408,7 @@ class App(ctk.CTk):
 
     def on_view(self):
         """Live preview of what the watcher sees for the selected account. Local only, nothing is sent."""
-        sel = self.tree.selection()
-        st = self.states.get(int(sel[0])) if sel else None
+        st = self._pick()
         if st is None and len(self.states) == 1:
             st = next(iter(self.states.values()))
         if st is None:
@@ -1384,7 +1446,7 @@ class App(ctk.CTk):
                 img_lbl.configure(image=None, text=note)
             if frame is not None:
                 if egg:
-                    info.configure(text="● SECRET DETECTED", text_color=RED_HOT)
+                    info.configure(text="● SECRET DETECTED", text_color=AMBER)
                 else:
                     info.configure(text="● Watching: no secret on screen", text_color=GREEN)
                 if note == "minimized":
@@ -1471,7 +1533,7 @@ class App(ctk.CTk):
         else:
             self._refresh_table()
         if self._tick_n % 3 == 0:
-            self.refresh_stats(tables=(self.page == "Stats"))
+            self.refresh_stats()
         self._drain()
         self.after(700, self._tick)
 
@@ -1480,12 +1542,12 @@ class App(ctk.CTk):
         def run():
             if not UPDATE_URL:
                 if manual:
-                    self.log("Updates aren't set up in this build yet (UPDATE_URL is empty).")
+                    self.log("Update checking isn't set up in this build (UPDATE_URL is empty).")
                 return
             try:
-                info = fetch_update_info()
-                if info["version"] and parse_version(info["version"]) > parse_version(APP_VERSION):
-                    self.after(0, self._show_update, info)
+                ver, url, notes, asset = fetch_update_info()
+                if ver and parse_version(ver) > parse_version(APP_VERSION):
+                    self.after(0, self._show_update, ver, url, notes, asset)
                 elif manual:
                     self.log(f"You're up to date (v{APP_VERSION}).")
             except Exception as e:
@@ -1493,58 +1555,93 @@ class App(ctk.CTk):
                     self.log(f"Couldn't check for updates: {str(e)[:80]}")
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_update(self, info):
-        self.update_info = info
-        ver = info["version"]
+    def _show_update(self, ver, url, notes, asset):
+        self.update_info = (ver, url, notes, asset)
         label = ver if ver.lower().startswith("v") else "v" + ver
-        self.update_btn.configure(text=f"⬆  Update {label}: click to install", state="normal",
-                                  command=self.on_update_click)
+        self.update_btn.configure(text=f"⬆  Update to {label}", state="normal")
         self.update_btn.grid()
         if getattr(self, "_update_logged", None) != ver:
             self._update_logged = ver
-            play_sound("update")
-            self.log(f"NEW UPDATE {label} is available (you have v{APP_VERSION})."
-                     + (f" {info['notes'][:120]}" if info["notes"] else ""))
+            self.log(f"NEW UPDATE {label} is available (you have v{APP_VERSION}). Click the Update button at the bottom-left."
+                     + (f" {notes[:120]}" if notes else ""))
 
     def on_update_click(self):
-        info = self.update_info
-        if not info:
+        if not self.update_info or self._updating:
             return
-        play_sound("click")
-        can_self = bool(getattr(sys, "frozen", False)) and info["exe"].lower().startswith("https://")
-        text = (f"Version {info['version']} is available (you have v{APP_VERSION}).\n\n"
-                + (info["notes"][:600] + "\n\n" if info["notes"] else "")
-                + ("Install it now? The app closes and reopens by itself." if can_self
-                   else "Open the download page?"))
-        if not messagebox.askyesno("Update available", text):
+        ver, url, notes, asset = self.update_info
+        label = ver if ver.lower().startswith("v") else "v" + ver
+        installed = bool(getattr(sys, "frozen", False))
+        if not (installed and asset.startswith("https://")):
+            if url:  # running from source, or the release has no .exe attached: open the download page
+                webbrowser.open(url)
             return
-        if can_self:
-            self._download_update(info)
-        else:
-            webbrowser.open(info["page"] or info["exe"])
+        msg = f"Install {label} now?\n\nThe app will download the update, close, replace itself and reopen."
+        if notes.strip():
+            msg += "\n\nWhat's new:\n" + notes.strip()[:400]
+        if not messagebox.askyesno("Update Secret Hatch Notifer+", msg):
+            return
+        self._updating = True
+        self.update_btn.configure(text="Downloading… 0%", state="disabled")
+        self.log(f"Downloading {label}…")
 
-    def _download_update(self, info):
-        self.update_btn.configure(state="disabled", text="Downloading update… 0%")
-
-        def progress(p):
-            self.after(0, lambda: self.update_btn.configure(text=f"Downloading update… {p}%"))
+        def fail(e):
+            self._updating = False
+            self.update_btn.configure(text="⚠  Update failed: click to retry", state="normal")
+            self.log(f"Update failed: {str(e)[:120]}")
 
         def run():
             try:
-                path = download_update_file(info, progress)
-                launch_updater(path)
+                folder = os.path.join(tempfile.gettempdir(), "SecretHatchNotiferUpdate")
+                os.makedirs(folder, exist_ok=True)
+                newexe = os.path.join(folder, "new.exe")
+                with requests.get(asset, stream=True, timeout=30, headers={"User-Agent": "SecretHatchNotifer"}) as r:
+                    r.raise_for_status()
+                    total, got, last = int(r.headers.get("content-length") or 0), 0, -1
+                    with open(newexe, "wb") as f:
+                        for chunk in r.iter_content(1 << 20):
+                            f.write(chunk)
+                            got += len(chunk)
+                            pct = int(got * 100 / total) if total else 0
+                            if pct != last:
+                                last = pct
+                                self.after(0, lambda p=pct: self.update_btn.configure(text=f"Downloading… {p}%"))
+                with open(newexe, "rb") as f:
+                    head = f.read(2)
+                if got < 5 * 1024 * 1024 or head != b"MZ" or (total and got != total):
+                    raise RuntimeError("the downloaded file looks incomplete")
+                self.after(0, self._quit_for_update, newexe)
             except Exception as e:
-                self.log(f"Update failed: {str(e)[:120]}")
-                play_sound("error")
-                self.after(0, lambda: self.update_btn.configure(state="normal", text="⬆  Update failed: click to retry"))
-                return
-            self.log("Update downloaded. Restarting…")
-            self.after(300, self._quit_for_update)
+                self.after(0, fail, e)
         threading.Thread(target=run, daemon=True).start()
 
-    def _quit_for_update(self):
-        self.stop.set()
-        self.destroy()
+    def _quit_for_update(self, newexe):
+        target = sys.executable
+        bat_path = os.path.join(os.path.dirname(newexe), "apply_update.bat")
+        bat = (
+            "@echo off\r\n"
+            "chcp 65001 >nul\r\n"
+            "set TRIES=0\r\n"
+            ":wait\r\n"
+            "ping -n 2 127.0.0.1 >nul\r\n"
+            "set /a TRIES+=1\r\n"
+            f'move /y "{newexe}" "{target}" >nul 2>&1\r\n'
+            "if not errorlevel 1 goto done\r\n"
+            "if %TRIES% GEQ 90 goto fail\r\n"
+            "goto wait\r\n"
+            ":done\r\n"
+            "ping -n 3 127.0.0.1 >nul\r\n"
+            f'start "" "{target}"\r\n'
+            '(goto) 2>nul & del "%~f0"\r\n'
+            ":fail\r\n"
+            f'start "" "{target}"\r\n'
+        )
+        with open(bat_path, "w", encoding="utf-8", newline="") as f:
+            f.write(bat)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("_PYI", "_MEI"))}
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=0x08000000 | 0x00000200, close_fds=True, env=env)
+        self.log("Update downloaded. Restarting…")
+        self.on_close()
         os._exit(0)
 
     def _periodic_update_check(self):
